@@ -178,6 +178,45 @@ defmodule DiffexTest do
       diff = %{size: {:changed, 5, 10}}
       assert Diffex.apply_diff(original, diff) == {:ok, %Widget{color: :red, size: 10}}
     end
+
+    test "added on existing key returns key_exists error" do
+      assert Diffex.apply_diff(%{a: 1}, %{a: {:added, 99}}) ==
+               {:error, {:key_exists, :a, 1}}
+    end
+
+    test "apply diff to struct with unknown field silently drops it" do
+      original = %Point{x: 1, y: 2}
+      diff = %{z: {:added, 99}}
+      assert Diffex.apply_diff(original, diff) == {:ok, %Point{x: 1, y: 2}}
+    end
+
+    test "apply diff to struct returns error on value mismatch" do
+      original = %Point{x: 1, y: 2}
+      diff = %{x: {:changed, 99, 5}}
+
+      assert Diffex.apply_diff(original, diff) ==
+               {:error, {:value_mismatch, :x, %{expected: 99, actual: 1}}}
+    end
+
+    test "tuple_diff mismatch returns error with key path" do
+      diff = %{a: {:tuple_diff, %{1 => {:changed, 2, 9}}}}
+
+      assert Diffex.apply_diff(%{a: {1, 99, 3}}, diff) ==
+               {:error, {:value_mismatch, [:a, 1], %{expected: 2, actual: 99}}}
+    end
+
+    test "tuple_diff with key_exists error passes through" do
+      diff = %{a: {:tuple_diff, %{0 => {:added, 99}}}}
+
+      assert Diffex.apply_diff(%{a: {1, 2}}, diff) == {:error, {:key_exists, 0, 1}}
+    end
+
+    test "nested map diff with key_exists error passes through" do
+      diff = %{user: %{name: {:added, "Bob"}}}
+
+      assert Diffex.apply_diff(%{user: %{name: "Alice"}}, diff) ==
+               {:error, {:key_exists, :name, "Alice"}}
+    end
   end
 
   describe "equal?/2" do
@@ -229,6 +268,128 @@ defmodule DiffexTest do
       assert length(summary) == 2
       assert "added :c (value: 3)" in summary
       assert "removed :b (was: 2)" in summary
+    end
+  end
+
+  describe "diff/2 lists and tuples" do
+    test "equal lists produce no diff entry" do
+      assert Diffex.diff(%{a: [1, 2, 3]}, %{a: [1, 2, 3]}) == %{}
+    end
+
+    test "equal tuples produce no diff entry" do
+      assert Diffex.diff(%{a: {1, 2}}, %{a: {1, 2}}) == %{}
+    end
+
+    test "changed element at index" do
+      assert Diffex.diff(%{a: [1, 2, 3]}, %{a: [1, 9, 3]}) ==
+               %{a: {:list_diff, %{1 => {:changed, 2, 9}}}}
+    end
+
+    test "added tail element" do
+      assert Diffex.diff(%{a: [1, 2]}, %{a: [1, 2, 3]}) ==
+               %{a: {:list_diff, %{2 => {:added, 3}}}}
+    end
+
+    test "removed tail element" do
+      assert Diffex.diff(%{a: [1, 2, 3]}, %{a: [1, 2]}) ==
+               %{a: {:list_diff, %{2 => {:removed, 3}}}}
+    end
+
+    test "changed tuple element at index" do
+      assert Diffex.diff(%{a: {1, 2, 3}}, %{a: {1, 9, 3}}) ==
+               %{a: {:tuple_diff, %{1 => {:changed, 2, 9}}}}
+    end
+
+    test "nested map inside list is diffed recursively" do
+      old = %{a: [%{x: 1}, %{y: 2}]}
+      new = %{a: [%{x: 1}, %{y: 9}]}
+
+      assert Diffex.diff(old, new) ==
+               %{a: {:list_diff, %{1 => %{y: {:changed, 2, 9}}}}}
+    end
+
+    test "list inside tuple is diffed recursively" do
+      old = %{a: {[1, 2], :ok}}
+      new = %{a: {[1, 9], :ok}}
+
+      assert Diffex.diff(old, new) ==
+               %{a: {:tuple_diff, %{0 => {:list_diff, %{1 => {:changed, 2, 9}}}}}}
+    end
+
+    test "list vs non-list is a :changed operation" do
+      assert Diffex.diff(%{a: [1, 2]}, %{a: 42}) == %{a: {:changed, [1, 2], 42}}
+    end
+
+    test "tuple vs non-tuple is a :changed operation" do
+      assert Diffex.diff(%{a: {1, 2}}, %{a: 42}) == %{a: {:changed, {1, 2}, 42}}
+    end
+  end
+
+  describe "apply_diff/2 lists and tuples" do
+    test "apply list_diff" do
+      original = %{a: [1, 2, 3]}
+      diff = Diffex.diff(original, %{a: [1, 9, 3]})
+      assert Diffex.apply_diff(original, diff) == {:ok, %{a: [1, 9, 3]}}
+    end
+
+    test "apply tuple_diff" do
+      original = %{a: {1, 2, 3}}
+      diff = Diffex.diff(original, %{a: {1, 9, 3}})
+      assert Diffex.apply_diff(original, diff) == {:ok, %{a: {1, 9, 3}}}
+    end
+
+    test "apply list_diff with added element" do
+      original = %{a: [1, 2]}
+      diff = Diffex.diff(original, %{a: [1, 2, 3]})
+      assert Diffex.apply_diff(original, diff) == {:ok, %{a: [1, 2, 3]}}
+    end
+
+    test "apply list_diff with removed element" do
+      original = %{a: [1, 2, 3]}
+      diff = Diffex.diff(original, %{a: [1, 2]})
+      assert Diffex.apply_diff(original, diff) == {:ok, %{a: [1, 2]}}
+    end
+
+    test "list_diff mismatch returns error" do
+      diff = %{a: {:list_diff, %{1 => {:changed, 2, 9}}}}
+
+      assert Diffex.apply_diff(%{a: [1, 99, 3]}, diff) ==
+               {:error, {:value_mismatch, [:a, 1], %{expected: 2, actual: 99}}}
+    end
+
+    test "apply list_diff removing a middle element compacts correctly" do
+      # Hand-crafted diff: remove index 1 from [1,2,3] -> [1,3]
+      diff = %{a: {:list_diff, %{1 => {:removed, 2}}}}
+      assert Diffex.apply_diff(%{a: [1, 2, 3]}, diff) == {:ok, %{a: [1, 3]}}
+    end
+
+    test "added on existing list index returns key_exists error" do
+      diff = %{a: {:list_diff, %{0 => {:added, 99}}}}
+      assert Diffex.apply_diff(%{a: [1, 2]}, diff) == {:error, {:key_exists, 0, 1}}
+    end
+  end
+
+  describe "count_changes/1 lists and tuples" do
+    test "list_diff counts leaf changes" do
+      diff = Diffex.diff(%{a: [1, 2, 3]}, %{a: [1, 9, 3, 4]})
+      assert Diffex.count_changes(diff) == 2
+    end
+
+    test "tuple_diff counts leaf changes" do
+      diff = Diffex.diff(%{a: {1, 2}}, %{a: {9, 9}})
+      assert Diffex.count_changes(diff) == 2
+    end
+  end
+
+  describe "summarize/1 lists and tuples" do
+    test "list change includes index in path" do
+      diff = Diffex.diff(%{a: [1, 2, 3]}, %{a: [1, 9, 3]})
+      assert Diffex.summarize(diff) == ["changed :a.1 from 2 to 9"]
+    end
+
+    test "tuple change includes index in path" do
+      diff = Diffex.diff(%{a: {1, 2}}, %{a: {1, 9}})
+      assert Diffex.summarize(diff) == ["changed :a.1 from 2 to 9"]
     end
   end
 
@@ -416,6 +577,16 @@ defmodule DiffexTest do
   end
 
   describe "apply_diff/2 properties" do
+    property "round-trip holds for maps containing lists" do
+      check all(
+              old <- map_of(atom(:alphanumeric), list_of(integer(), max_length: 5), max_length: 5),
+              new <- map_of(atom(:alphanumeric), list_of(integer(), max_length: 5), max_length: 5)
+            ) do
+        diff = Diffex.diff(old, new)
+        assert Diffex.apply_diff(old, diff) == {:ok, new}
+      end
+    end
+
     property "applying a diff of map to itself succeeds and returns original" do
       check all(map <- flat_map_gen()) do
         diff = Diffex.diff(map, map)

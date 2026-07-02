@@ -5,15 +5,16 @@ defmodule Diffex do
   Returns a diff describing operations needed to transform the first argument
   into the second argument.
 
-  Lists, tuples, and other non-map values are treated as opaque scalars — they
-  are compared with `==` and reported as `{:changed, old, new}` rather than
-  diffed structurally.
+  Lists and tuples are diffed structurally by index position. Other non-map,
+  non-list, non-tuple values are treated as opaque scalars compared with `==`.
   """
 
   @type diff_op :: :added | :removed | :changed
   @type diff_value ::
           {diff_op, any()}
           | {diff_op, any(), any()}
+          | {:list_diff, %{non_neg_integer() => diff_value}}
+          | {:tuple_diff, %{non_neg_integer() => diff_value}}
           | %{optional(any()) => diff_value}
 
   @doc """
@@ -79,8 +80,50 @@ defmodule Diffex do
     end
   end
 
+  defp diff_values(old_val, new_val) when is_list(old_val) and is_list(new_val) do
+    diff_indexed(old_val, new_val, :list_diff)
+  end
+
+  defp diff_values(old_val, new_val) when is_tuple(old_val) and is_tuple(new_val) do
+    diff_indexed(Tuple.to_list(old_val), Tuple.to_list(new_val), :tuple_diff)
+  end
+
   defp diff_values(old_val, new_val) do
     {:changed, old_val, new_val}
+  end
+
+  defp diff_indexed(old_list, new_list, tag) do
+    old_map = old_list |> Enum.with_index() |> Map.new(fn {v, i} -> {i, v} end)
+    new_map = new_list |> Enum.with_index() |> Map.new(fn {v, i} -> {i, v} end)
+
+    old_keys = old_map |> Map.keys() |> MapSet.new()
+    new_keys = new_map |> Map.keys() |> MapSet.new()
+
+    removed =
+      Map.new(MapSet.difference(old_keys, new_keys), fn i ->
+        {i, {:removed, Map.fetch!(old_map, i)}}
+      end)
+
+    added =
+      Map.new(MapSet.difference(new_keys, old_keys), fn i ->
+        {i, {:added, Map.fetch!(new_map, i)}}
+      end)
+
+    common =
+      Enum.reduce(MapSet.intersection(old_keys, new_keys), %{}, fn i, acc ->
+        case diff_values(Map.fetch!(old_map, i), Map.fetch!(new_map, i)) do
+          :equal -> acc
+          change -> Map.put(acc, i, change)
+        end
+      end)
+
+    changes = Map.merge(removed, Map.merge(added, common))
+
+    if changes == %{} do
+      :equal
+    else
+      {tag, changes}
+    end
   end
 
   @doc """
@@ -113,6 +156,8 @@ defmodule Diffex do
   defp count_operation({:added, _value}), do: 1
   defp count_operation({:removed, _value}), do: 1
   defp count_operation({:changed, _old, _new}), do: 1
+  defp count_operation({:list_diff, changes}), do: count_changes(changes)
+  defp count_operation({:tuple_diff, changes}), do: count_changes(changes)
   defp count_operation(nested_diff) when is_map(nested_diff), do: count_changes(nested_diff)
 
   @doc """
@@ -132,7 +177,9 @@ defmodule Diffex do
       {:error, {:value_mismatch, :b, %{expected: 2, actual: 999}}}
   """
   @spec apply_diff(map(), %{optional(any()) => diff_value()}) ::
-          {:ok, map()} | {:error, {:value_mismatch, any(), map()}}
+          {:ok, map()}
+          | {:error, {:value_mismatch, any(), map()}}
+          | {:error, {:key_exists, any(), any()}}
 
   def apply_diff(original, diff) when is_struct(original) do
     struct_module = original.__struct__
@@ -153,26 +200,48 @@ defmodule Diffex do
   end
 
   defp apply_operation(acc, key, {:added, value}) do
-    {:ok, Map.put(acc, key, value)}
-  end
-
-  defp apply_operation(acc, key, {:removed, expected}) do
-    actual = Map.get(acc, key)
-
-    if actual == expected do
-      {:ok, Map.delete(acc, key)}
+    if Map.has_key?(acc, key) do
+      {:error, {:key_exists, key, Map.fetch!(acc, key)}}
     else
-      {:error, {:value_mismatch, key, %{expected: expected, actual: actual}}}
+      {:ok, Map.put(acc, key, value)}
     end
   end
 
-  defp apply_operation(acc, key, {:changed, expected_old, new}) do
-    actual_old = Map.get(acc, key)
+  defp apply_operation(acc, key, {:removed, expected}) do
+    with :ok <- check_match(acc, key, expected), do: {:ok, Map.delete(acc, key)}
+  end
 
-    if actual_old == expected_old do
-      {:ok, Map.put(acc, key, new)}
-    else
-      {:error, {:value_mismatch, key, %{expected: expected_old, actual: actual_old}}}
+  defp apply_operation(acc, key, {:changed, expected_old, new_val}) do
+    with :ok <- check_match(acc, key, expected_old), do: {:ok, Map.put(acc, key, new_val)}
+  end
+
+  defp apply_operation(acc, key, {:list_diff, changes}) do
+    current = Map.get(acc, key, [])
+
+    case apply_indexed_diff(current, changes) do
+      {:ok, new_list} ->
+        {:ok, Map.put(acc, key, new_list)}
+
+      {:error, {:value_mismatch, nested_key, details}} ->
+        {:error, {:value_mismatch, [key | List.wrap(nested_key)], details}}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp apply_operation(acc, key, {:tuple_diff, changes}) do
+    current = acc |> Map.get(key, {}) |> Tuple.to_list()
+
+    case apply_indexed_diff(current, changes) do
+      {:ok, new_list} ->
+        {:ok, Map.put(acc, key, List.to_tuple(new_list))}
+
+      {:error, {:value_mismatch, nested_key, details}} ->
+        {:error, {:value_mismatch, [key | List.wrap(nested_key)], details}}
+
+      {:error, _} = error ->
+        error
     end
   end
 
@@ -185,6 +254,37 @@ defmodule Diffex do
 
       {:error, {:value_mismatch, nested_key, details}} ->
         {:error, {:value_mismatch, [key | List.wrap(nested_key)], details}}
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp check_match(acc, key, expected) do
+    case Map.get(acc, key) do
+      ^expected -> :ok
+      actual -> {:error, {:value_mismatch, key, %{expected: expected, actual: actual}}}
+    end
+  end
+
+  defp apply_indexed_diff(list, changes) do
+    old_map = list |> Enum.with_index() |> Map.new(fn {v, i} -> {i, v} end)
+
+    result =
+      Enum.reduce_while(changes, {:ok, old_map}, fn {i, op}, {:ok, acc} ->
+        case apply_operation(acc, i, op) do
+          {:ok, new_acc} -> {:cont, {:ok, new_acc}}
+          error -> {:halt, error}
+        end
+      end)
+
+    case result do
+      {:ok, index_map} ->
+        new_list = index_map |> Enum.sort_by(fn {i, _} -> i end) |> Enum.map(fn {_, v} -> v end)
+        {:ok, new_list}
+
+      error ->
+        error
     end
   end
 
@@ -217,8 +317,8 @@ defmodule Diffex do
 
   defp summarize(diff, path) do
     Enum.flat_map(diff, fn {key, operation} ->
-      current_path = path ++ [key]
-      path_str = current_path |> Enum.map_join(".", &inspect/1)
+      current_path = [key | path]
+      path_str = current_path |> Enum.reverse() |> Enum.map_join(".", &inspect/1)
 
       case operation do
         {:added, value} ->
@@ -229,6 +329,12 @@ defmodule Diffex do
 
         {:changed, old, new} ->
           ["changed #{path_str} from #{inspect(old)} to #{inspect(new)}"]
+
+        {:list_diff, changes} ->
+          summarize(changes, current_path)
+
+        {:tuple_diff, changes} ->
+          summarize(changes, current_path)
 
         nested_diff when is_map(nested_diff) ->
           summarize(nested_diff, current_path)
