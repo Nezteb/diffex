@@ -623,7 +623,7 @@ defmodule DiffexTest do
             ) do
         diff = Diffex.diff(old, new)
 
-        # Flip every value in old to something distinct — application should
+        # Flip every value in old to something distinct - application should
         # fail on the first :changed key whose expected value no longer matches.
         changed_keys =
           for {key, {:changed, _old_val, _new_val}} <- diff, do: key
@@ -648,7 +648,7 @@ defmodule DiffexTest do
         diff = Diffex.diff(old, new)
         summary = Diffex.summarize(diff)
 
-        # For flat maps each diff key is a leaf — count should match
+        # For flat maps each diff key is a leaf - count should match
         assert length(summary) == map_size(diff)
       end
     end

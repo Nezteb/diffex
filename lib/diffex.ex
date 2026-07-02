@@ -1,12 +1,12 @@
 defmodule Diffex do
   @moduledoc """
-  A dependency-free module for computing minimal diffs between nested maps/structs.
+  Minimal diffs between nested maps, structs, lists, and tuples.
 
-  Returns a diff describing operations needed to transform the first argument
-  into the second argument.
+  Returns a map describing what needs to change to turn the first argument
+  into the second.
 
-  Lists and tuples are diffed structurally by index position. Other non-map,
-  non-list, non-tuple values are treated as opaque scalars compared with `==`.
+  Lists and tuples are compared by index position. Everything else is compared
+  with `==`.
   """
 
   @type diff_op :: :added | :removed | :changed
@@ -18,17 +18,17 @@ defmodule Diffex do
           | %{optional(any()) => diff_value}
 
   @doc """
-  Computes the minimal diff between two maps or structs.
+  Returns the diff between two maps or structs.
 
   ## Return format
 
-  Returns a map where each key maps to one of:
+  Each key in the result maps to one of:
   - `{:added, new_value}` - key exists only in `new`
   - `{:removed, old_value}` - key exists only in `old`
   - `{:changed, old_value, new_value}` - scalar value changed
   - `%{...}` - nested diff for nested maps/structs
 
-  Returns an empty map `%{}` if there are no differences.
+  Returns `%{}` if there are no differences.
 
   ## Examples
 
@@ -127,10 +127,10 @@ defmodule Diffex do
   end
 
   @doc """
-  Counts the total number of changes in a diff, including nested changes.
+  Counts the leaf-level changes in a diff.
 
-  Each `:added`, `:removed`, or `:changed` operation counts as 1.
-  Nested diffs are traversed recursively to count their leaf operations.
+  Each `:added`, `:removed`, or `:changed` counts as 1. Nested diffs are
+  traversed recursively.
 
   ## Examples
 
@@ -161,10 +161,11 @@ defmodule Diffex do
   defp count_operation(nested_diff) when is_map(nested_diff), do: count_changes(nested_diff)
 
   @doc """
-  Applies a diff to a map/struct, returning the transformed result.
+  Applies a diff to a map or struct.
 
-  Validates that `:changed` and `:removed` operations match the expected "before" value.
-  Returns `{:ok, result}` on success, or `{:error, reason}` if validation fails.
+  For `:changed` and `:removed` operations, the current value must match the
+  expected "before" value. Returns `{:ok, result}` on success or `{:error, reason}`
+  if a value doesn't match.
 
   ## Examples
 
@@ -289,7 +290,7 @@ defmodule Diffex do
   end
 
   @doc """
-  Returns true if there are no differences between the two maps.
+  Returns `true` if the two maps have no differences.
 
   ## Examples
 
@@ -305,7 +306,7 @@ defmodule Diffex do
   end
 
   @doc """
-  Returns a human-readable summary of the diff.
+  Returns a list of strings describing each change in the diff.
 
   ## Examples
 
