@@ -1,0 +1,6 @@
+- This is an Elixir struct/map/list diffing library.
+- Make sure to follow Elixir's library guidelines: https://elixir.hexdocs.pm/library-guidelines.html
+- Avoid common Elixir anti-patterns:
+  - https://elixir.hexdocs.pm/code-anti-patterns.html
+  - https://elixir.hexdocs.pm/design-anti-patterns.html
+  - https://elixir.hexdocs.pm/process-anti-patterns.html
