@@ -4,6 +4,10 @@ defmodule Diffex do
 
   Returns a diff describing operations needed to transform the first argument
   into the second argument.
+
+  Lists, tuples, and other non-map values are treated as opaque scalars — they
+  are compared with `==` and reported as `{:changed, old, new}` rather than
+  diffed structurally.
   """
 
   @type diff_op :: :added | :removed | :changed
@@ -27,13 +31,13 @@ defmodule Diffex do
 
   ## Examples
 
-      iex> MapDiff.diff(%{a: 1, b: 2}, %{a: 1, b: 3})
+      iex> Diffex.diff(%{a: 1, b: 2}, %{a: 1, b: 3})
       %{b: {:changed, 2, 3}}
 
-      iex> MapDiff.diff(%{a: 1}, %{a: 1, b: 2})
+      iex> Diffex.diff(%{a: 1}, %{a: 1, b: 2})
       %{b: {:added, 2}}
 
-      iex> MapDiff.diff(%{a: %{x: 1, y: 2}}, %{a: %{x: 1, y: 3}})
+      iex> Diffex.diff(%{a: %{x: 1, y: 2}}, %{a: %{x: 1, y: 3}})
       %{a: %{y: {:changed, 2, 3}}}
   """
   @spec diff(map(), map()) :: %{optional(any()) => diff_value()}
@@ -49,39 +53,26 @@ defmodule Diffex do
     added_keys = MapSet.difference(new_keys, old_keys)
     common_keys = MapSet.intersection(old_keys, new_keys)
 
-    diff = %{}
+    removed = Map.new(removed_keys, fn key -> {key, {:removed, Map.fetch!(old, key)}} end)
+    added = Map.new(added_keys, fn key -> {key, {:added, Map.fetch!(new, key)}} end)
 
-    # Handle removed keys
-    diff =
-      Enum.reduce(removed_keys, diff, fn key, acc ->
-        Map.put(acc, key, {:removed, Map.get(old, key)})
+    common =
+      Enum.reduce(common_keys, %{}, fn key, acc ->
+        case diff_values(Map.fetch!(old, key), Map.fetch!(new, key)) do
+          :equal -> acc
+          change -> Map.put(acc, key, change)
+        end
       end)
 
-    # Handle added keys
-    diff =
-      Enum.reduce(added_keys, diff, fn key, acc ->
-        Map.put(acc, key, {:added, Map.get(new, key)})
-      end)
-
-    # Handle common keys - check for changes
-    Enum.reduce(common_keys, diff, fn key, acc ->
-      old_val = Map.get(old, key)
-      new_val = Map.get(new, key)
-
-      case diff_values(old_val, new_val) do
-        :equal -> acc
-        change -> Map.put(acc, key, change)
-      end
-    end)
+    Map.merge(removed, Map.merge(added, common))
   end
 
-  # Compare two values and return the appropriate diff representation
   defp diff_values(same, same), do: :equal
 
   defp diff_values(old_val, new_val) when is_map(old_val) and is_map(new_val) do
     nested_diff = diff(old_val, new_val)
 
-    if map_size(nested_diff) == 0 do
+    if nested_diff == %{} do
       :equal
     else
       nested_diff
@@ -93,19 +84,6 @@ defmodule Diffex do
   end
 
   @doc """
-  Counts the number of changes between two maps/structs directly.
-
-  ## Examples
-
-      iex> MapDiff.count_changes(%{a: 1, b: 2}, %{a: 1, b: 3, c: 4})
-      2
-  """
-  @spec count_changes(map(), map()) :: non_neg_integer()
-  def count_changes(old, new) when is_map(old) and is_map(new) do
-    diff(old, new) |> count_changes()
-  end
-
-  @doc """
   Counts the total number of changes in a diff, including nested changes.
 
   Each `:added`, `:removed`, or `:changed` operation counts as 1.
@@ -113,16 +91,16 @@ defmodule Diffex do
 
   ## Examples
 
-      iex> MapDiff.diff(%{a: 1, b: 2}, %{a: 1, b: 3}) |> MapDiff.count_changes()
+      iex> Diffex.diff(%{a: 1, b: 2}, %{a: 1, b: 3}) |> Diffex.count_changes()
       1
 
-      iex> MapDiff.diff(%{a: 1}, %{b: 2}) |> MapDiff.count_changes()
+      iex> Diffex.diff(%{a: 1}, %{b: 2}) |> Diffex.count_changes()
       2
 
-      iex> MapDiff.diff(
+      iex> Diffex.diff(
       ...>   %{user: %{name: "Alice", age: 30}},
       ...>   %{user: %{name: "Bob", age: 31}}
-      ...> ) |> MapDiff.count_changes()
+      ...> ) |> Diffex.count_changes()
       2
   """
   @spec count_changes(%{optional(any()) => diff_value()}) :: non_neg_integer()
@@ -140,17 +118,17 @@ defmodule Diffex do
   @doc """
   Applies a diff to a map/struct, returning the transformed result.
 
-  Validates that `:changed` operations match the expected "before" value.
+  Validates that `:changed` and `:removed` operations match the expected "before" value.
   Returns `{:ok, result}` on success, or `{:error, reason}` if validation fails.
 
   ## Examples
 
       iex> diff = %{b: {:changed, 2, 3}}
-      iex> MapDiff.apply_diff(%{a: 1, b: 2}, diff)
+      iex> Diffex.apply_diff(%{a: 1, b: 2}, diff)
       {:ok, %{a: 1, b: 3}}
 
       iex> diff = %{b: {:changed, 2, 3}}
-      iex> MapDiff.apply_diff(%{a: 1, b: 999}, diff)
+      iex> Diffex.apply_diff(%{a: 1, b: 999}, diff)
       {:error, {:value_mismatch, :b, %{expected: 2, actual: 999}}}
   """
   @spec apply_diff(map(), %{optional(any()) => diff_value()}) ::
@@ -166,24 +144,26 @@ defmodule Diffex do
   end
 
   def apply_diff(original, diff) when is_map(original) and is_map(diff) do
-    apply_diff_reduce(Map.to_list(diff), original)
-  end
-
-  defp apply_diff_reduce([], acc), do: {:ok, acc}
-
-  defp apply_diff_reduce([{key, operation} | rest], acc) do
-    case apply_operation(acc, key, operation) do
-      {:ok, new_acc} -> apply_diff_reduce(rest, new_acc)
-      {:error, _} = error -> error
-    end
+    Enum.reduce_while(diff, {:ok, original}, fn {key, operation}, {:ok, acc} ->
+      case apply_operation(acc, key, operation) do
+        {:ok, new_acc} -> {:cont, {:ok, new_acc}}
+        error -> {:halt, error}
+      end
+    end)
   end
 
   defp apply_operation(acc, key, {:added, value}) do
     {:ok, Map.put(acc, key, value)}
   end
 
-  defp apply_operation(acc, key, {:removed, _value}) do
-    {:ok, Map.delete(acc, key)}
+  defp apply_operation(acc, key, {:removed, expected}) do
+    actual = Map.get(acc, key)
+
+    if actual == expected do
+      {:ok, Map.delete(acc, key)}
+    else
+      {:error, {:value_mismatch, key, %{expected: expected, actual: actual}}}
+    end
   end
 
   defp apply_operation(acc, key, {:changed, expected_old, new}) do
@@ -204,7 +184,6 @@ defmodule Diffex do
         {:ok, Map.put(acc, key, new_nested)}
 
       {:error, {:value_mismatch, nested_key, details}} ->
-        # Prepend the current key to create a path
         {:error, {:value_mismatch, [key | List.wrap(nested_key)], details}}
     end
   end
@@ -214,10 +193,10 @@ defmodule Diffex do
 
   ## Examples
 
-      iex> MapDiff.equal?(%{a: 1}, %{a: 1})
+      iex> Diffex.equal?(%{a: 1}, %{a: 1})
       true
 
-      iex> MapDiff.equal?(%{a: 1}, %{a: 2})
+      iex> Diffex.equal?(%{a: 1}, %{a: 2})
       false
   """
   @spec equal?(map(), map()) :: boolean()
@@ -230,14 +209,16 @@ defmodule Diffex do
 
   ## Examples
 
-      iex> MapDiff.diff(%{a: 1, b: 2}, %{a: 1, c: 3}) |> MapDiff.summarize()
+      iex> Diffex.diff(%{a: 1, b: 2}, %{a: 1, c: 3}) |> Diffex.summarize()
       ["added :c (value: 3)", "removed :b (was: 2)"]
   """
-  @spec summarize(map(), list(any())) :: [String.t()]
-  def summarize(diff, path \\ []) do
+  @spec summarize(map()) :: [String.t()]
+  def summarize(diff), do: summarize(diff, [])
+
+  defp summarize(diff, path) do
     Enum.flat_map(diff, fn {key, operation} ->
       current_path = path ++ [key]
-      path_str = format_path(current_path)
+      path_str = current_path |> Enum.map_join(".", &inspect/1)
 
       case operation do
         {:added, value} ->
@@ -254,7 +235,4 @@ defmodule Diffex do
       end
     end)
   end
-
-  defp format_path([single]), do: inspect(single)
-  defp format_path(path), do: Enum.map_join(path, ".", &inspect/1)
 end

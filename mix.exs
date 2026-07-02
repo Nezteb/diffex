@@ -8,7 +8,11 @@ defmodule Diffex.MixProject do
       elixir: "~> 1.20",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
-      test_coverage: [tool: ExCoveralls]
+      test_coverage: [tool: ExCoveralls],
+      dialyzer: [
+        flags: [:missing_return, :extra_return, :unmatched_returns, :error_handling, :underspecs],
+        plt_add_apps: [:ex_unit, :mix]
+      ]
     ]
   end
 
